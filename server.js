@@ -4,9 +4,9 @@ const express = require('express');
 const superagent = require('superagent');
 const cors = require('cors');
 const pg = require('pg')
-require('dotenv').config();
-
 const app = express();
+
+require('dotenv').config();
 const PORT = process.env.PORT;
 
 // DB CONFIG
@@ -16,24 +16,27 @@ client.on('error', err => console.log(err));
 
 app.use(cors());
 
-// handle requests
+// TODO: build getLocation method
 app.get('/location', getLocation);
 app.get('/weather', getWeather);
 // app.get('/yelp', getYelp);
 // app.get('/movies', getMovies);
 
-function Location(query, data) {
+function handleError(err, res) {
+  console.error(err);
+  if (res) res.status(500).send('sorry, something broke');
+}
+
+function Location(res, query) {
   this.search_query = query;
-  this.formatted_query = data.formatted_address;
-  this.latitude = data.geometry.location.lat;
-  this.longitude = data.geometry.location.lng;
+  this.formatted_query = res.formatted_address;
+  this.latitude = res.geometry.location.lat;
+  this.longitude = res.geometry.location.lng;
 }
 
 function Weather(day) {
-  // this.tableName = 'weathers';
   this.forecast = day.summary;
   this.time = new Date(day.time * 1000).toDateString();
-  // this.created_at = Date.now();
 }
 
 // function Yelp(data) {
@@ -54,20 +57,13 @@ function Weather(day) {
 //   this.released_on = data.released_on;
 // }
 
-// HANDLERS
-// error handler
-function handleError(err, res) {
-  console.error(err);
-  if (res) res.status(500).send('sorry, something broke');
-}
 
-// location handler
 function getLocation(req, res) {
   const locationHandler = {
     query: req.query.data,
-    cacheHit: (result) => {
+    cacheHit: (results) => {
       console.log('got some location data from SQL');
-      res.send(result.rows[0]);
+      res.send(results.rows[0]);
     },
     cacheMiss: () => {
       Location.fetchLocation(req.query.data)
@@ -78,7 +74,6 @@ function getLocation(req, res) {
   Location.lookupLocation(locationHandler);
 }
 
-// weather handler
 function getWeather(req, res) {
   const weatherHandler = {
     location: req.query.data,
@@ -87,22 +82,25 @@ function getWeather(req, res) {
       res.send(result.rows);
     },
     cacheMiss: () => {
-      Weather.fetchWeather(req.data)
-        .then( results => res.send(results) )
+      Weather.fetchWeather(req.query.data)
+        .then(result => res.send(result))
         .catch(error => handleError(error, res));
-    },
+    }
   };
   Weather.lookupWeather(weatherHandler);
 }
 
 // LOCATION LOGIC
 // create a method to save data
-Location.prototype.save = () => {
-  let SQL = `INSERT INTO locations (search_query,formatted_query,latitude,longitude) VALUES($1, $2, $3, $4) RETURNING id;`;
+Location.prototype.save = function() {
+  let SQL = `INSERT INTO locations
+      (search_query,formatted_query,latitude,longitude)
+      VALUES($1,$2,$3,$4)
+      RETURNING id;`;
   let values = Object.values(this);
   return client.query(SQL, values);
 }
-// create a method to fetch location
+// create a method to fetchlocation
 Location.fetchLocation = (query) => {
   const _URL = `https://maps.googleapis.com/maps/api/geocode/json?address=${query}&key=${process.env.GEOCODE_API_KEY}`;
   return superagent.get(_URL)
@@ -112,7 +110,7 @@ Location.fetchLocation = (query) => {
       if (!data.body.results.length) { throw 'No Data'; }
       else {
         // create an instance in the db and save it
-        let location = new Location(query, data.body.results[0]);
+        let location = new Location(data.body.results[0], query);
         console.log('location', location);
         return location.save().then(result => {
           location.id = result.rows[0].id;
@@ -124,7 +122,7 @@ Location.fetchLocation = (query) => {
 };
 // create a method for location lookup
 Location.lookupLocation = (handler) => {
-  const SQL = `SELECT * FROM locations WHERE search_query=$1;`;
+  const SQL = `SELECT * FROM locations WHERE search_query=$1`;
   const values = [handler.query];
 
   return client.query(SQL, values)
@@ -141,8 +139,10 @@ Location.lookupLocation = (handler) => {
 // WEATHER LOGIC
 // create a method to save data
 Weather.prototype.save = (id) => {
-  const SQL = `INSERT INTO weathers (forecast, time, location_id) VALUES ($1, $2, $3);`;
-  const values = Object.values(this);
+  const SQL = `INSERT INTO weathers
+  (forecast,time,location_id)
+  VALUES ($1,$2,$3);`;
+  const values = [this.forecast,this.time];
   values.push(id);
   client.query(SQL, values);
 };
@@ -160,14 +160,14 @@ Weather.fetchWeather = (location) => {
       return weatherSummaries;
     });
 };
+
 // create a method for weather lookup
 Weather.lookupWeather = (handler) => {
   const SQL = `SELECT * FROM weathers WHERE location_id=$1;`;
   const values = [handler.location.id];
-
   client.query(SQL, values)
     .then(result => {
-      if (result.rowCount > 0) {
+      if(result.rowCount > 0) {
         console.log('Got data from SQL');
         handler.cacheHit(result);
       } else {
